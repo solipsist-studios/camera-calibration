@@ -6,11 +6,15 @@ import pickle
 
 # Camera calibration parameters
 # You can modify these variables as needed
-CHESSBOARD_SIZE = (9, 6)  # Number of inner corners per chessboard row and column
-SQUARE_SIZE = 2.5         # Size of a square in centimeters
+CHESSBOARD_SIZE = [9, 6]  # Number of inner corners per chessboard row and column
+SQUARE_SIZE = 4.3         # Size of a square in centimeters
 CALIBRATION_IMAGES_PATH = 'calibration_images/*.jpg'  # Path to calibration images
 OUTPUT_DIRECTORY = 'output'  # Directory to save calibration results
 SAVE_UNDISTORTED = True   # Whether to save undistorted images
+# If None, the code will pick the top-right chessboard corner as the fixed anchor.
+# Otherwise set to an integer index into each object point array (0..N-1).
+FIXED_POINT_INDEX = None
+FISHEYE = True  # Whether to use fisheye model
 
 def calibrate_camera():
     """
@@ -49,7 +53,7 @@ def calibrate_camera():
     
     # Process each calibration image
     for idx, fname in enumerate(images):
-        img = cv2.imread(fname)
+        img = cv2.imread(fname, flags=cv2.IMREAD_COLOR+cv2.IMREAD_IGNORE_ORIENTATION)
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         
         # Find the chessboard corners
@@ -81,10 +85,55 @@ def calibrate_camera():
     
     print("Calibrating camera...")
     
-    # Calibrate camera
-    ret, mtx, dist, rvecs, tvecs = cv2.calibrateCamera(
-        objpoints, imgpoints, gray.shape[::-1], None, None
-    )
+    rvecs = []
+    tvecs = []
+    if (FISHEYE):
+        # Fisheye calibration
+        K = np.zeros((3, 3))
+        D = np.zeros((4, 1))
+        
+        objpoints_reshaped = [op.reshape(1, -1, 3) for op in objpoints]
+        imgpoints_reshaped = [ip.reshape(1, -1, 2) for ip in imgpoints]
+        
+        flags = cv2.fisheye.CALIB_RECOMPUTE_EXTRINSIC + cv2.fisheye.CALIB_CHECK_COND + cv2.fisheye.CALIB_FIX_SKEW
+        results = cv2.fisheye.calibrate(
+            objpoints_reshaped,
+            imgpoints_reshaped,
+            gray.shape[::-1],
+            K,
+            D,
+            flags = flags
+        )
+    else:
+        # Calibrate camera using calibrateCameraRO (returns same data as calibrateCamera
+        # but may also return an updated set of object points as a sixth value in
+        # some OpenCV builds). Handle either form consistently.
+        new_objpoints = None
+        # Choose the fixed-point index (anchor) to pass to calibrateCameraRO.
+        # If FIXED_POINT_INDEX is None, pick the center corner of the chessboard.
+        num_corners = CHESSBOARD_SIZE[0] * CHESSBOARD_SIZE[1]
+        if FIXED_POINT_INDEX is None:
+            # Use the top-right corner as the anchor (authors' recommendation):
+            # row = 0 (top), col = cols - 1 (rightmost)
+            cols = CHESSBOARD_SIZE[0]
+            fixed_index = (0) * cols + (cols - 1)
+        else:
+            fixed_index = FIXED_POINT_INDEX
+
+        if not (0 <= fixed_index < num_corners):
+            raise ValueError(f'FIXED_POINT_INDEX (computed {fixed_index}) out of range [0, {num_corners-1}]')
+
+        # Pass the fixed index as the iFixedPoint argument (anchor point index)
+        results = cv2.calibrateCameraRO(objpoints, imgpoints, gray.shape[::-1], fixed_index, None, None)
+
+    # cv2.calibrateCameraRO typically returns (ret, cameraMatrix, distCoeffs, rvecs, tvecs)
+    # but some builds include newObjPoints as a sixth element. Unpack defensively.
+    if isinstance(results, tuple) and len(results) >= 5:
+        ret, mtx, dist, rvecs, tvecs = results[:5]
+        if len(results) > 5:
+            new_objpoints = results[5]
+    else:
+        raise RuntimeError('Unexpected return value from calibration function')
     
     # Save calibration results
     calibration_data = {
@@ -102,10 +151,18 @@ def calibrate_camera():
     np.savetxt(os.path.join(OUTPUT_DIRECTORY, 'camera_matrix.txt'), mtx)
     np.savetxt(os.path.join(OUTPUT_DIRECTORY, 'distortion_coefficients.txt'), dist)
     
+    if FISHEYE:
+        calculate_reprojection_error(objpoints_reshaped, imgpoints_reshaped, mtx, dist, rvecs, tvecs)
+    # elif new_objpoints is not None:
+    #     print("Calibration calculated updated object points.")
+    #     calculate_reprojection_error(new_objpoints, imgpoints, mtx, dist, rvecs, tvecs)
+    else:
+        calculate_reprojection_error(objpoints, imgpoints, mtx, dist, rvecs, tvecs)
+
     print(f"Calibration complete! RMS re-projection error: {ret}")
     print(f"Results saved to {OUTPUT_DIRECTORY}")
     
-    return ret, mtx, dist, rvecs, tvecs
+    return ret, mtx, dist, rvecs, tvecs, gray.shape[::-1]
 
 def undistort_images(mtx, dist):
     """
@@ -134,15 +191,23 @@ def undistort_images(mtx, dist):
         img = cv2.imread(fname)
         h, w = img.shape[:2]
         
-        # Refine camera matrix based on free scaling parameter
-        newcameramtx, roi = cv2.getOptimalNewCameraMatrix(mtx, dist, (w, h), 1, (w, h))
+        if FISHEYE:
+            # Fisheye undistortion
+            newcameramtx = cv2.fisheye.estimateNewCameraMatrixForUndistortRectify(
+                mtx, dist, (w, h), np.eye(3), balance=0.0)
+            map1, map2 = cv2.fisheye.initUndistortRectifyMap(
+                mtx, dist, np.eye(3), newcameramtx, (w, h), cv2.CV_16SC2)
+            dst = cv2.remap(img, map1, map2, interpolation=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT)
+        else:
+            # Refine camera matrix based on free scaling parameter
+            newcameramtx, roi = cv2.getOptimalNewCameraMatrix(mtx, dist, (w, h), 1, (w, h))
+            
+            # Undistort image
+            dst = cv2.undistort(img, mtx, dist, None, newcameramtx)
         
-        # Undistort image
-        dst = cv2.undistort(img, mtx, dist, None, newcameramtx)
-        
-        # Crop the image (optional)
-        x, y, w, h = roi
-        dst = dst[y:y+h, x:x+w]
+            # Crop the image (optional)
+            x, y, w, h = roi
+            dst = dst[y:y+h, x:x+w]
         
         # Save undistorted image
         output_img_path = os.path.join(undistorted_dir, f'undistorted_{os.path.basename(fname)}')
@@ -169,7 +234,11 @@ def calculate_reprojection_error(objpoints, imgpoints, mtx, dist, rvecs, tvecs):
     """
     total_error = 0
     for i in range(len(objpoints)):
-        imgpoints2, _ = cv2.projectPoints(objpoints[i], rvecs[i], tvecs[i], mtx, dist)
+        if FISHEYE:
+            imgpoints2, _ = cv2.fisheye.projectPoints(objpoints[i], rvecs[i], tvecs[i], mtx, dist)
+        else:
+            imgpoints2, _ = cv2.projectPoints(objpoints[i], rvecs[i], tvecs[i], mtx, dist)
+
         error = cv2.norm(imgpoints[i], imgpoints2, cv2.NORM_L2) / len(imgpoints2)
         total_error += error
         print(f"Reprojection error for image {i+1}: {error}")
@@ -186,7 +255,7 @@ def main():
     print("Starting camera calibration...")
     
     # Calibrate camera
-    ret, mtx, dist, rvecs, tvecs = calibrate_camera()
+    ret, mtx, dist, rvecs, tvecs, size = calibrate_camera()
     
     if mtx is None:
         print("Calibration failed. Exiting.")
@@ -196,6 +265,16 @@ def main():
     undistort_images(mtx, dist)
     
     print("Camera calibration completed successfully!")
+    print(f"fl_x ← {mtx[0, 0]}")
+    print(f"fl_y ← {mtx[1, 1]}")
+    print(f"cx ← {mtx[0, 2]}")
+    print(f"cy ← {mtx[1, 2]}")
+    print(f"w ← {size[0]}")
+    print(f"h ← {size[1]}")
+    print(f"k1 ← {dist[0, 0]}")
+    print(f"k2 ← {dist[1, 0]}")
+    print(f"k3 ← {dist[2, 0]}")
+    print(f"k4 ← {dist[3, 0]}")
 
 if __name__ == "__main__":
     main()
