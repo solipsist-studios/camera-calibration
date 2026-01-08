@@ -8,13 +8,13 @@ import pickle
 # You can modify these variables as needed
 CHESSBOARD_SIZE = [9, 6]  # Number of inner corners per chessboard row and column
 SQUARE_SIZE = 4.3         # Size of a square in centimeters
-CALIBRATION_IMAGES_PATH = 'calibration_images/*.jpg'  # Path to calibration images
+CALIBRATION_IMAGES_PATH = 'F:\\Photos\\Lumix\\calibration\\*.jpg'  # Path to calibration images
 OUTPUT_DIRECTORY = 'output'  # Directory to save calibration results
 SAVE_UNDISTORTED = True   # Whether to save undistorted images
 # If None, the code will pick the top-right chessboard corner as the fixed anchor.
 # Otherwise set to an integer index into each object point array (0..N-1).
 FIXED_POINT_INDEX = None
-FISHEYE = True  # Whether to use fisheye model
+FISHEYE = False  # Whether to use fisheye model
 
 def calibrate_camera():
     """
@@ -271,10 +271,16 @@ def main():
     print(f"cy ← {mtx[1, 2]}")
     print(f"w ← {size[0]}")
     print(f"h ← {size[1]}")
-    print(f"k1 ← {dist[0, 0]}")
-    print(f"k2 ← {dist[1, 0]}")
-    print(f"k3 ← {dist[2, 0]}")
-    print(f"k4 ← {dist[3, 0]}")
+    dist_flat = dist.flatten()
+    if FISHEYE:
+        labels = ["k1", "k2", "k3", "k4"]
+    else:
+        # OpenCV returns perspective coeffs as [k1, k2, p1, p2, k3, k4, k5, k6, s1, s2, s3, s4, tx, ty]
+        labels = ["k1", "k2", "p1", "p2", "k3", "k4", "k5", "k6", "s1", "s2", "s3", "s4", "tx", "ty"]
+
+    for idx, coeff in enumerate(dist_flat):
+        label = labels[idx] if idx < len(labels) else f"coeff_{idx}"
+        print(f"{label} ← {coeff}")
 
 if __name__ == "__main__":
     main()
