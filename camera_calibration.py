@@ -26,6 +26,7 @@ def calibrate_camera():
         dist: Distortion coefficients
         rvecs: Rotation vectors
         tvecs: Translation vectors
+        size: Image size (width, height)
     """
     # Prepare object points (0,0,0), (1,0,0), (2,0,0) ... (8,5,0)
     objp = np.zeros((CHESSBOARD_SIZE[0] * CHESSBOARD_SIZE[1], 3), np.float32)
@@ -137,11 +138,13 @@ def calibrate_camera():
     
     # Save calibration results
     calibration_data = {
+        'model': 'OPENCV_FISHEYE' if FISHEYE else 'OPENCV',
         'camera_matrix': mtx,
         'distortion_coefficients': dist,
         'rotation_vectors': rvecs,
         'translation_vectors': tvecs,
-        'reprojection_error': ret
+        'reprojection_error': ret,
+        'image_size': gray.shape[::-1],  # (width, height)
     }
     
     with open(os.path.join(OUTPUT_DIRECTORY, 'calibration_data.pkl'), 'wb') as f:

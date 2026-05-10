@@ -40,8 +40,13 @@ def convert_intrinsics(K_old, dim_calib, dim_video):
     w_video, h_video = dim_video
 
     # 1. Calculate the Scale Factor
-    # We assume the Horizontal Field of View is constant (sensor width is fully used).
-    scale = w_video / w_calib
+    # Calculate how much each dimension needs to change
+    scale_w = w_video / w_calib
+    scale_h = h_video / h_calib
+    
+    # Always use the SMALLER scale factor - this ensures the image fits within the target
+    # and we then crop or pad the other dimension to reach the target size
+    scale = min(scale_w, scale_h)
 
     # 2. Scale the Intrinsics
     # Focal lengths and principal points scale linearly with resolution.
@@ -49,24 +54,40 @@ def convert_intrinsics(K_old, dim_calib, dim_video):
     K_new *= scale # Scales fx, fy, cx, cy
     K_new[2, 2] = 1.0 # Restore the bottom-right 1.0
 
-    # 3. Adjust for Vertical Crop
-    # If we scaled the original sensor to the new width, what would its height be?
+    # 3. Adjust for Crops
+    # Calculate what the dimensions would be after scaling
+    w_calib_scaled = w_calib * scale
     h_calib_scaled = h_calib * scale
     
-    # The difference between the scaled height and actual video height 
-    # is what was cropped off (top + bottom).
-    total_crop = h_calib_scaled - h_video
+    # Calculate crop amounts (handles center crop and letterbox)
+    # In the latter scenario, crop will be negative
+    h_crop = h_calib_scaled - h_video
+    w_crop = w_calib_scaled - w_video
     
-    # We assume a CENTER crop (removing equal amounts from top and bottom).
-    # We shift the principal point (cy) up by half the crop amount.
-    y_shift = total_crop / 2.0
+    # Adjust principal point for crops 
+    # center crop will cause a shift to the left/up equal to half the crop amount
+    # letterboxing will cause a shift to the right/down equal to the width of one band
+    x_shift = w_crop / 2.0
+    y_shift = h_crop / 2.0
     
-    K_new[1, 2] -= y_shift
+    K_new[0, 2] -= x_shift  # cx adjustment for horizontal crop
+    K_new[1, 2] -= y_shift  # cy adjustment for vertical crop
 
     print(f"--- Conversion Report ---")
     print(f"Resolution: {dim_calib} -> {dim_video}")
     print(f"Scale Factor: {scale:.4f}")
-    print(f"Vertical Crop: {total_crop:.1f} pixels (scaled)")
+    if w_crop > 0:
+        print(f"Horizontal: CROP {w_crop:.1f} pixels (scaled)")
+    elif w_crop < 0:
+        print(f"Horizontal: PAD {-w_crop:.1f} pixels (letterbox)")
+    else:
+        print(f"Horizontal: No crop/pad")
+    if h_crop > 0:
+        print(f"Vertical: CROP {h_crop:.1f} pixels (scaled)")
+    elif h_crop < 0:
+        print(f"Vertical: PAD {-h_crop:.1f} pixels (pillarbox)")
+    else:
+        print(f"Vertical: No crop/pad")
     print(f"New Matrix:\n{K_new}")
     
     return K_new
@@ -117,11 +138,12 @@ def main():
     K_old = data['camera_matrix']
     dim_calib = (args.calib_width, args.calib_height)
     dim_video = (args.video_width, args.video_height)
-    
+
     K_new = convert_intrinsics(K_old, dim_calib, dim_video)
-    
-    # Update calibration data with converted matrix
+
+    # Update calibration data with converted matrix and target image size
     data['camera_matrix'] = K_new
+    data['image_size'] = dim_video
     
     # Save if output file is specified
     if args.output_file:
