@@ -13,6 +13,54 @@ CALIBRATION_FILE = 'output/calibration_data.pkl'
 SUPPORTED_EXTS = {'.jpg', '.jpeg', '.png', '.bmp', '.tif', '.tiff'}
 SUPPORTED_MODELS = {'OPENCV', 'OPENCV_FISHEYE'}
 
+
+def load_matrix_from_text(path):
+    matrix = np.loadtxt(path)
+    matrix = np.array(matrix, dtype=np.float64)
+    if matrix.shape != (3, 3):
+        raise ValueError(f'camera_matrix must be 3x3, got shape {matrix.shape}')
+    return matrix
+
+
+def load_distortion_from_text(path):
+    dist = np.loadtxt(path)
+    dist = np.array(dist, dtype=np.float64).reshape(-1)
+    if dist.size not in {4, 5, 8, 12, 14}:
+        raise ValueError(
+            'distortion_coefficients must contain 4, 5, 8, 12, or 14 values '
+            f'(got {dist.size})'
+        )
+    return dist.reshape(1, -1)
+
+
+def save_calibration_from_text(camera_matrix_path, distortion_coefficients_path, output_path, model=None):
+    if not os.path.exists(camera_matrix_path):
+        raise FileNotFoundError(f'Camera matrix file not found at {camera_matrix_path}')
+    if not os.path.exists(distortion_coefficients_path):
+        raise FileNotFoundError(f'Distortion coefficients file not found at {distortion_coefficients_path}')
+
+    mtx = load_matrix_from_text(camera_matrix_path)
+    dist = load_distortion_from_text(distortion_coefficients_path)
+
+    inferred_model = infer_model(model, dist)
+    calibration_data = {
+        'camera_matrix': mtx,
+        'distortion_coefficients': dist,
+        'rotation_vectors': None,
+        'translation_vectors': None,
+        'reprojection_error': None,
+        'image_size': None,
+        'model': inferred_model,
+    }
+
+    output_dir = os.path.dirname(output_path)
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)
+    with open(output_path, 'wb') as f:
+        pickle.dump(calibration_data, f)
+
+    return inferred_model, mtx, dist
+
 def infer_model(model, dist):
     if model in SUPPORTED_MODELS:
         return model
@@ -135,7 +183,29 @@ def main():
     parser.add_argument('--info', action='store_true', help='Print calibration info and exit without processing images.')
     parser.add_argument('--zoom_factor', type=float, default=1.0, help='Zoom factor for fisheye undistortion (>1.0 zooms in).')
     parser.add_argument('--workers', type=int, default=None, help='Number of parallel workers (default: number of CPU cores).')
+    parser.add_argument('--generate-calibration-pkl', type=str, help='Generate a calibration .pkl file from text intrinsics and exit.')
+    parser.add_argument('--camera-matrix-file', type=str, help='Path to camera_matrix text file (for --generate-calibration-pkl mode).')
+    parser.add_argument('--distortion-coefficients-file', type=str, help='Path to distortion_coefficients text file (for --generate-calibration-pkl mode).')
+    parser.add_argument('--model', choices=sorted(SUPPORTED_MODELS), help='Optional camera model to store in generated calibration file.')
     args = parser.parse_args()
+
+    if args.generate_calibration_pkl:
+        if not args.camera_matrix_file or not args.distortion_coefficients_file:
+            print('Error: --camera-matrix-file and --distortion-coefficients-file are required with --generate-calibration-pkl')
+            return
+        try:
+            model, mtx, dist = save_calibration_from_text(
+                args.camera_matrix_file,
+                args.distortion_coefficients_file,
+                args.generate_calibration_pkl,
+                args.model,
+            )
+            print(f'Saved calibration pkl to {args.generate_calibration_pkl}')
+            print(f'Model: {model}')
+            print(f'Camera matrix shape: {mtx.shape}, distortion shape: {dist.shape}')
+        except (FileNotFoundError, ValueError) as exc:
+            print(f'Error: {exc}')
+        return
 
     try:
         mtx, dist, model, data, rvecs, tvecs = load_calibration(args.calibration_file)
