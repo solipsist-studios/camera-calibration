@@ -9,7 +9,7 @@ import cv2
 import numpy as np
 from tqdm import tqdm
 
-CALIBRATION_FILE = 'output/calibration_data.pkl'
+CALIBRATION_PATH = 'output/calibration_data.pkl'
 SUPPORTED_EXTS = {'.jpg', '.jpeg', '.png', '.bmp', '.tif', '.tiff'}
 SUPPORTED_MODELS = {'OPENCV', 'OPENCV_FISHEYE'}
 
@@ -84,6 +84,37 @@ def load_calibration(path):
     tvecs = data.get('translation_vectors')
     return mtx, dist, model, data, rvecs, tvecs
 
+
+def resolve_calibration_for_image(calibration_path, rel_path):
+    """Resolve calibration file for an image.
+
+    If calibration_path is a file, that file is used for all images.
+    If calibration_path is a directory, find a .pkl file that matches image naming.
+    """
+    if os.path.isfile(calibration_path):
+        return calibration_path
+
+    if not os.path.isdir(calibration_path):
+        raise FileNotFoundError(f'Calibration path not found: {calibration_path}')
+
+    rel_stem = str(Path(rel_path).with_suffix('.pkl'))
+    basename_stem = f'{Path(rel_path).stem}.pkl'
+
+    candidates = [
+        os.path.join(calibration_path, rel_stem),
+        os.path.join(calibration_path, basename_stem),
+    ]
+
+    for candidate in candidates:
+        if os.path.exists(candidate):
+            return candidate
+
+    raise FileNotFoundError(
+        'No matching calibration .pkl found for image '
+        f'"{rel_path}" in directory "{calibration_path}". '
+        f'Tried: {", ".join(candidates)}'
+    )
+
 def print_calibration_info(calibration_path, mtx, dist, model, data, rvecs, tvecs):
     with np.printoptions(precision=16, suppress=True):
         print(f'Calibration file: {calibration_path}')
@@ -117,6 +148,33 @@ def undistort_image(image, mtx, dist, fisheye, alpha=1.0, balance=0.0, crop=Fals
         undistorted = undistorted[y:y + h_roi, x:x + w_roi]
     return undistorted
 
+
+def build_undistorted_calibration_data(mtx, dist, image_size, fisheye, alpha=1.0, balance=0.0, zoom_factor=1.0):
+    w, h = image_size
+    if fisheye:
+        new_mtx = cv2.fisheye.estimateNewCameraMatrixForUndistortRectify(
+            mtx, dist, (w, h), np.eye(3), balance=balance
+        )
+        new_mtx[0, 0] = new_mtx[0, 0] * zoom_factor  # fx
+        new_mtx[1, 1] = new_mtx[1, 1] * zoom_factor  # fy
+    else:
+        new_mtx, _ = cv2.getOptimalNewCameraMatrix(mtx, dist, (w, h), alpha, (w, h))
+
+    return {
+        'camera_matrix': new_mtx,
+        'distortion_coefficients': np.zeros_like(dist),
+        'rotation_vectors': None,
+        'translation_vectors': None,
+        'reprojection_error': None,
+        'image_size': (w, h),
+        'model': 'OPENCV',
+        'undistortion_parameters': {
+            'alpha': alpha if not fisheye else None,
+            'balance': balance if fisheye else None,
+            'zoom_factor': zoom_factor if fisheye else None,
+        },
+    }
+
 def collect_files_with_structure(inputs):
     """Collect files while preserving their relative paths from source directories."""
     files = []  # List of (absolute_path, relative_path, source_base_dir)
@@ -138,7 +196,19 @@ def collect_files_with_structure(inputs):
 
 def process_image_worker(args):
     """Process a single image (worker function for parallel processing)."""
-    abs_path, rel_path, source_base, calib_path, output_dir, fisheye, alpha, balance, crop, zoom_factor = args
+    (
+        abs_path,
+        rel_path,
+        source_base,
+        calib_path,
+        output_dir,
+        fisheye,
+        alpha,
+        balance,
+        crop,
+        zoom_factor,
+        undistorted_calibration_out,
+    ) = args
     
     try:
         # Load calibration data
@@ -148,6 +218,7 @@ def process_image_worker(args):
         img = cv2.imread(abs_path, flags=cv2.IMREAD_COLOR + cv2.IMREAD_IGNORE_ORIENTATION)
         if img is None:
             return (abs_path, False, 'Could not read')
+        h, w = img.shape[:2]
         
         # Undistort image
         undistorted = undistort_image(img, mtx, dist, fisheye=fisheye, alpha=alpha, 
@@ -166,6 +237,22 @@ def process_image_worker(args):
         os.makedirs(out_dir, exist_ok=True)
         out_path = os.path.join(out_dir, out_name)
         success = cv2.imwrite(out_path, undistorted)
+
+        if success and undistorted_calibration_out is not None:
+            undistorted_data = build_undistorted_calibration_data(
+                mtx,
+                dist,
+                (w, h),
+                fisheye,
+                alpha=alpha,
+                balance=balance,
+                zoom_factor=zoom_factor,
+            )
+            calib_dir = os.path.dirname(undistorted_calibration_out)
+            if calib_dir:
+                os.makedirs(calib_dir, exist_ok=True)
+            with open(undistorted_calibration_out, 'wb') as f:
+                pickle.dump(undistorted_data, f)
         
         return (out_path, success, None)
     except Exception as e:
@@ -174,9 +261,22 @@ def process_image_worker(args):
 def main():
     parser = argparse.ArgumentParser(description='Undistort one or more images using saved calibration data.')
     parser.add_argument('inputs', nargs='*', help='Image files, directories, or glob patterns to undistort.')
-    parser.add_argument('-c', '--calibration-file', default=CALIBRATION_FILE, help='Path to calibration pickle file.')
+    parser.add_argument(
+        '-c',
+        '--calibration-path',
+        default=CALIBRATION_PATH,
+        help='Path to a calibration .pkl file, or a directory of per-image .pkl files named like the input images.',
+    )
     parser.add_argument('-o', '--output-dir', default='output/undistorted_offline', help='Directory to save undistorted images.')
-    parser.add_argument('-u', '--undistorted-calibration', type=str, help='Path to save the new calibration file with zero distortion after undistortion.')
+    parser.add_argument(
+        '-u',
+        '--undistorted-calibration',
+        type=str,
+        help=(
+            'Path for undistorted calibration output. In single-calibration mode, this is a file path. '
+            'In batch mode, this is treated as a directory for per-image calibration files.'
+        ),
+    )
     parser.add_argument('--alpha', type=float, default=1.0, help='Free scaling parameter for standard model (0..1).')
     parser.add_argument('--balance', type=float, default=0.0, help='Fisheye balance parameter (0..1).')
     parser.add_argument('--crop', action='store_true', help='Crop to valid ROI (standard model only).')
@@ -207,19 +307,35 @@ def main():
             print(f'Error: {exc}')
         return
 
-    try:
-        mtx, dist, model, data, rvecs, tvecs = load_calibration(args.calibration_file)
-    except (FileNotFoundError, ValueError) as exc:
-        print(f'Error: {exc}')
-        return
-
-    fisheye = model == 'OPENCV_FISHEYE'
-
-    print(f'Using {model} camera model for undistortion. Zoom factor: {args.zoom_factor}')
-
     files = collect_files_with_structure(args.inputs)
 
-    if args.undistorted_calibration:
+    is_calibration_dir = os.path.isdir(args.calibration_path)
+
+    if is_calibration_dir and args.info:
+        print('Error: --info is only supported when --calibration-path is a single .pkl file.')
+        return
+
+    if is_calibration_dir and args.undistorted_calibration and os.path.isfile(args.undistorted_calibration):
+        print('Error: in batch mode, --undistorted-calibration must be a directory path, not a file path.')
+        return
+
+    if is_calibration_dir:
+        model = 'MIXED'
+        data = {}
+        rvecs = None
+        tvecs = None
+        fisheye = False
+        print('Using per-image calibration files from directory: ' + args.calibration_path)
+    else:
+        try:
+            mtx, dist, model, data, rvecs, tvecs = load_calibration(args.calibration_path)
+        except (FileNotFoundError, ValueError) as exc:
+            print(f'Error: {exc}')
+            return
+        fisheye = model == 'OPENCV_FISHEYE'
+        print(f'Using {model} camera model for undistortion. Zoom factor: {args.zoom_factor}')
+
+    if args.undistorted_calibration and not is_calibration_dir:
         # Prefer image size from calibration metadata; fall back to first input image if absent
         calib_size = data.get('image_size')
         w = h = None
@@ -233,29 +349,15 @@ def main():
                 print('Could not determine image size from first image; skipping undistorted calibration save.')
 
         if w is not None and h is not None:
-            if fisheye:
-                new_mtx = cv2.fisheye.estimateNewCameraMatrixForUndistortRectify(mtx, dist, (w, h), np.eye(3), balance=args.balance)
-                # Apply zoom factor
-                new_mtx[0, 0] = new_mtx[0, 0] * args.zoom_factor  # fx
-                new_mtx[1, 1] = new_mtx[1, 1] * args.zoom_factor  # fy
-            else:
-                new_mtx, _ = cv2.getOptimalNewCameraMatrix(mtx, dist, (w, h), args.alpha, (w, h))
-
-            # Create new calibration data in the same schema used by convert_intrinsics
-            undistorted_data = {
-                'camera_matrix': new_mtx,
-                'distortion_coefficients': np.zeros_like(dist),
-                'rotation_vectors': None,
-                'translation_vectors': None,
-                'reprojection_error': None,
-                'image_size': (w, h),
-                'model': 'OPENCV',
-                'undistortion_parameters': {
-                    'alpha': args.alpha if not fisheye else None,
-                    'balance': args.balance if fisheye else None,
-                    'zoom_factor': args.zoom_factor if fisheye else None
-                }
-            }
+            undistorted_data = build_undistorted_calibration_data(
+                mtx,
+                dist,
+                (w, h),
+                fisheye,
+                alpha=args.alpha,
+                balance=args.balance,
+                zoom_factor=args.zoom_factor,
+            )
 
             calib_dir = os.path.dirname(args.undistorted_calibration)
             if calib_dir:
@@ -268,24 +370,72 @@ def main():
             print('Could not determine image size; skipping undistorted calibration save.')
 
     if args.info:
-        print_calibration_info(args.calibration_file, mtx, dist, model, data, rvecs, tvecs)
+        print_calibration_info(args.calibration_path, mtx, dist, model, data, rvecs, tvecs)
         return
 
     if not files:
         print('No input images found. Supported extensions: ' + ', '.join(sorted(SUPPORTED_EXTS)))
         return
 
-    print(f'Loaded calibration from {args.calibration_file} ({model} model)')
+    if is_calibration_dir:
+        print(f'Loaded per-image calibration directory: {args.calibration_path}')
+    else:
+        print(f'Loaded calibration from {args.calibration_path} ({model} model)')
     print(f'Processing {len(files)} image(s) with {args.workers or "auto"} worker(s)...')
 
     os.makedirs(args.output_dir, exist_ok=True)
 
     # Prepare work items for parallel processing
-    work_items = [
-        (abs_path, rel_path, source_base, args.calibration_file, args.output_dir, 
-         fisheye, args.alpha, args.balance, args.crop, args.zoom_factor)
-        for abs_path, rel_path, source_base in files
-    ]
+    work_items = []
+    for abs_path, rel_path, source_base in files:
+        try:
+            calibration_path = resolve_calibration_for_image(args.calibration_path, rel_path)
+        except FileNotFoundError as exc:
+            print(f'Error: {exc}')
+            failed = len(files)
+            print(f'\nCompleted: 0, Failed: {failed}')
+            return
+
+        image_fisheye = fisheye
+        undistorted_calibration_out = None
+        if is_calibration_dir:
+            try:
+                _, image_dist, image_model, _, _, _ = load_calibration(calibration_path)
+                image_fisheye = image_model == 'OPENCV_FISHEYE'
+            except (FileNotFoundError, ValueError) as exc:
+                print(f'Error: failed to load calibration "{calibration_path}": {exc}')
+                failed = len(files)
+                print(f'\nCompleted: 0, Failed: {failed}')
+                return
+
+            calib_name = f'undistorted_{Path(rel_path).stem}.pkl'
+            if args.undistorted_calibration:
+                calib_base_dir = args.undistorted_calibration
+                rel_dir = os.path.dirname(rel_path)
+                calib_out_dir = os.path.join(calib_base_dir, rel_dir) if rel_dir else calib_base_dir
+                undistorted_calibration_out = os.path.join(calib_out_dir, calib_name)
+            else:
+                rel_dir = os.path.dirname(rel_path) if source_base is not None else ''
+                calib_out_dir = os.path.join(args.output_dir, rel_dir) if rel_dir else args.output_dir
+                undistorted_calibration_out = os.path.join(calib_out_dir, calib_name)
+        elif args.undistorted_calibration:
+            undistorted_calibration_out = args.undistorted_calibration
+
+        work_items.append(
+            (
+                abs_path,
+                rel_path,
+                source_base,
+                calibration_path,
+                args.output_dir,
+                image_fisheye,
+                args.alpha,
+                args.balance,
+                args.crop,
+                args.zoom_factor,
+                undistorted_calibration_out,
+            )
+        )
 
     # Process images in parallel
     completed = 0
