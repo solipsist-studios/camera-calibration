@@ -33,6 +33,17 @@ def load_distortion_from_text(path):
     return dist.reshape(1, -1)
 
 
+def ensure_directory(path):
+    if path and not os.path.isdir(path):
+        os.makedirs(path)
+
+
+def resolve_output_target(output_path, is_single_input):
+    if is_single_input and output_path and Path(output_path).suffix:
+        return output_path, os.path.dirname(output_path)
+    return output_path, output_path
+
+
 def save_calibration_from_text(camera_matrix_path, distortion_coefficients_path, output_path, model=None):
     if not os.path.exists(camera_matrix_path):
         raise FileNotFoundError(f'Camera matrix file not found at {camera_matrix_path}')
@@ -55,7 +66,7 @@ def save_calibration_from_text(camera_matrix_path, distortion_coefficients_path,
 
     output_dir = os.path.dirname(output_path)
     if output_dir:
-        os.makedirs(output_dir, exist_ok=True)
+        ensure_directory(output_dir)
     with open(output_path, 'wb') as f:
         pickle.dump(calibration_data, f)
 
@@ -82,7 +93,12 @@ def load_calibration(path):
     model = infer_model(model_from_file, dist)
     rvecs = data.get('rotation_vectors')
     tvecs = data.get('translation_vectors')
-    return mtx, dist, model, data, rvecs, tvecs
+    image_size = data.get('image_size')
+    if image_size is not None:
+        width, height = image_size
+    else:
+        width = height = None
+    return width, height, mtx, dist, model, data, rvecs, tvecs
 
 
 def resolve_calibration_for_image(calibration_path, rel_path):
@@ -115,10 +131,11 @@ def resolve_calibration_for_image(calibration_path, rel_path):
         f'Tried: {", ".join(candidates)}'
     )
 
-def print_calibration_info(calibration_path, mtx, dist, model, data, rvecs, tvecs):
+def print_calibration_info(calibration_path, width, height, mtx, dist, model, data, rvecs, tvecs):
     with np.printoptions(precision=16, suppress=True):
         print(f'Calibration file: {calibration_path}')
         print(f'Model: {model}')
+        print(f'Image size: {width}x{height}')
         print(f'Camera matrix:\n{mtx}')
         print(f'Distortion coefficients: {dist.ravel()}')
         reproj = data.get('reprojection_error')
@@ -208,11 +225,12 @@ def process_image_worker(args):
         crop,
         zoom_factor,
         undistorted_calibration_out,
+        output_target,
     ) = args
     
     try:
         # Load calibration data
-        mtx, dist, _, _, _, _ = load_calibration(calib_path)
+        _, _, mtx, dist, _, _, _, _ = load_calibration(calib_path)
         
         # Read image
         img = cv2.imread(abs_path, flags=cv2.IMREAD_COLOR + cv2.IMREAD_IGNORE_ORIENTATION)
@@ -225,7 +243,10 @@ def process_image_worker(args):
                                      balance=balance, crop=crop, zoom_factor=zoom_factor)
         
         # Build output path preserving directory structure
-        if source_base is not None:
+        if output_target and Path(output_target).suffix and len(rel_path) > 0 and source_base is None:
+            out_dir = os.path.dirname(output_target)
+            out_name = os.path.basename(output_target)
+        elif source_base is not None:
             dir_part = os.path.dirname(rel_path)
             file_part = Path(rel_path).name
             out_dir = os.path.join(output_dir, dir_part) if dir_part else output_dir
@@ -234,7 +255,7 @@ def process_image_worker(args):
             out_dir = output_dir
             out_name = f"undistorted_{rel_path}"
         
-        os.makedirs(out_dir, exist_ok=True)
+        ensure_directory(out_dir)
         out_path = os.path.join(out_dir, out_name)
         success = cv2.imwrite(out_path, undistorted)
 
@@ -250,7 +271,7 @@ def process_image_worker(args):
             )
             calib_dir = os.path.dirname(undistorted_calibration_out)
             if calib_dir:
-                os.makedirs(calib_dir, exist_ok=True)
+                ensure_directory(calib_dir)
             with open(undistorted_calibration_out, 'wb') as f:
                 pickle.dump(undistorted_data, f)
         
@@ -328,7 +349,7 @@ def main():
         print('Using per-image calibration files from directory: ' + args.calibration_path)
     else:
         try:
-            mtx, dist, model, data, rvecs, tvecs = load_calibration(args.calibration_path)
+            w, h, mtx, dist, model, data, rvecs, tvecs = load_calibration(args.calibration_path)
         except (FileNotFoundError, ValueError) as exc:
             print(f'Error: {exc}')
             return
@@ -361,7 +382,7 @@ def main():
 
             calib_dir = os.path.dirname(args.undistorted_calibration)
             if calib_dir:
-                os.makedirs(calib_dir, exist_ok=True)
+                ensure_directory(calib_dir)
 
             with open(args.undistorted_calibration, 'wb') as f:
                 pickle.dump(undistorted_data, f)
@@ -370,7 +391,7 @@ def main():
             print('Could not determine image size; skipping undistorted calibration save.')
 
     if args.info:
-        print_calibration_info(args.calibration_path, mtx, dist, model, data, rvecs, tvecs)
+        print_calibration_info(args.calibration_path, w, h, mtx, dist, model, data, rvecs, tvecs)
         return
 
     if not files:
@@ -383,7 +404,9 @@ def main():
         print(f'Loaded calibration from {args.calibration_path} ({model} model)')
     print(f'Processing {len(files)} image(s) with {args.workers or "auto"} worker(s)...')
 
-    os.makedirs(args.output_dir, exist_ok=True)
+    is_single_input = len(files) == 1
+    output_target, output_base_dir = resolve_output_target(args.output_dir, is_single_input)
+    ensure_directory(output_base_dir)
 
     # Prepare work items for parallel processing
     work_items = []
@@ -400,7 +423,7 @@ def main():
         undistorted_calibration_out = None
         if is_calibration_dir:
             try:
-                _, image_dist, image_model, _, _, _ = load_calibration(calibration_path)
+                _, _, _, _, image_model, _, _, _ = load_calibration(calibration_path)
                 image_fisheye = image_model == 'OPENCV_FISHEYE'
             except (FileNotFoundError, ValueError) as exc:
                 print(f'Error: failed to load calibration "{calibration_path}": {exc}')
@@ -434,6 +457,7 @@ def main():
                 args.crop,
                 args.zoom_factor,
                 undistorted_calibration_out,
+                output_target,
             )
         )
 
