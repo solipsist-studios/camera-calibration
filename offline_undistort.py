@@ -34,8 +34,8 @@ def load_distortion_from_text(path):
 
 
 def ensure_directory(path):
-    if path and not os.path.isdir(path):
-        os.makedirs(path)
+    if path:
+        os.makedirs(path, exist_ok=True)
 
 
 def resolve_output_target(output_path, is_single_input):
