@@ -21,28 +21,28 @@ def save_calibration(data, path):
         pickle.dump(data, f)
     print(f'Saved converted calibration to {path}')
 
-def convert_intrinsics(K_old, dim_calib, dim_video):
+def convert_intrinsics(K_old, dim_input, dim_output):
     """
     Converts camera intrinsics from Calibration resolution to Video resolution.
     Handles scaling (resolution change) and cropping (aspect ratio change).
     
     Args:
         K_old: The 3x3 camera matrix from calibration
-        dim_calib: (width, height) of the images used for calibration
-        dim_video: (width, height) of your actual video footage
+        dim_input: (width, height) of the source intrinsics
+        dim_output: (width, height) of your target video/images
     
     Returns:
         K_new: The converted 3x3 camera matrix
     """
     # NOTE: The Distortion Coefficients (D) do NOT change. 
     # You use the exact same D values from your calibration.
-    w_calib, h_calib = dim_calib
-    w_video, h_video = dim_video
+    w_input, h_input = dim_input
+    w_output, h_output = dim_output
 
     # 1. Calculate the Scale Factor
     # Calculate how much each dimension needs to change
-    scale_w = w_video / w_calib
-    scale_h = h_video / h_calib
+    scale_w = w_output / w_input
+    scale_h = h_output / h_input
     
     # Always use the SMALLER scale factor - this ensures the image fits within the target
     # and we then crop or pad the other dimension to reach the target size
@@ -56,13 +56,13 @@ def convert_intrinsics(K_old, dim_calib, dim_video):
 
     # 3. Adjust for Crops
     # Calculate what the dimensions would be after scaling
-    w_calib_scaled = w_calib * scale
-    h_calib_scaled = h_calib * scale
+    w_input_scaled = w_input * scale
+    h_input_scaled = h_input * scale
     
     # Calculate crop amounts (handles center crop and letterbox)
     # In the latter scenario, crop will be negative
-    h_crop = h_calib_scaled - h_video
-    w_crop = w_calib_scaled - w_video
+    h_crop = h_input_scaled - h_output
+    w_crop = w_input_scaled - w_output
     
     # Adjust principal point for crops 
     # center crop will cause a shift to the left/up equal to half the crop amount
@@ -74,7 +74,7 @@ def convert_intrinsics(K_old, dim_calib, dim_video):
     K_new[1, 2] -= y_shift  # cy adjustment for vertical crop
 
     print(f"--- Conversion Report ---")
-    print(f"Resolution: {dim_calib} -> {dim_video}")
+    print(f"Resolution: {dim_input} -> {dim_output}")
     print(f"Scale Factor: {scale:.4f}")
     if w_crop > 0:
         print(f"Horizontal: CROP {w_crop:.1f} pixels (scaled)")
@@ -106,20 +106,20 @@ def main():
         help='Path to save converted calibration pickle file. If not provided, prints to console only.'
     )
     parser.add_argument(
-        '-cw', '--calib-width', type=int, required=True,
-        help='Width of images used for calibration (pixels).'
+        '-iw', '--input-width', type=int, required=True,
+        help='Width of input/source intrinsics resolution (pixels).'
     )
     parser.add_argument(
-        '-ch', '--calib-height', type=int, required=True,
-        help='Height of images used for calibration (pixels).'
+        '-ih', '--input-height', type=int, required=True,
+        help='Height of input/source intrinsics resolution (pixels).'
     )
     parser.add_argument(
-        '-vw', '--video-width', type=int, required=True,
-        help='Width of target video/images (pixels).'
+        '-ow', '--output-width', type=int, required=True,
+        help='Width of output/target video/images (pixels).'
     )
     parser.add_argument(
-        '-vh', '--video-height', type=int, required=True,
-        help='Height of target video/images (pixels).'
+        '-oh', '--output-height', type=int, required=True,
+        help='Height of output/target video/images (pixels).'
     )
     args = parser.parse_args()
 
@@ -136,14 +136,14 @@ def main():
 
     # Convert intrinsics
     K_old = data['camera_matrix']
-    dim_calib = (args.calib_width, args.calib_height)
-    dim_video = (args.video_width, args.video_height)
+    dim_input = (args.input_width, args.input_height)
+    dim_output = (args.output_width, args.output_height)
 
-    K_new = convert_intrinsics(K_old, dim_calib, dim_video)
+    K_new = convert_intrinsics(K_old, dim_input, dim_output)
 
     # Update calibration data with converted matrix and target image size
     data['camera_matrix'] = K_new
-    data['image_size'] = dim_video
+    data['image_size'] = dim_output
     
     # Save if output file is specified
     if args.output_file:
