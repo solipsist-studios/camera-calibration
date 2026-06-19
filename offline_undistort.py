@@ -34,14 +34,12 @@ def load_distortion_from_text(path):
 
 
 def ensure_directory(path):
-    if path:
-
-        os.makedirs(path, exist_ok=True)
-
+    if path:
+        os.makedirs(path, exist_ok=True)
 
 
 def resolve_output_target(output_path, is_single_input):
-    return None, output_path
+    if is_single_input and output_path and Path(output_path).suffix:
         return output_path, os.path.dirname(output_path)
     return output_path, output_path
 
@@ -243,9 +241,10 @@ def process_image_worker(args):
         # Undistort image
         undistorted = undistort_image(img, mtx, dist, fisheye=fisheye, alpha=alpha, 
                                      balance=balance, crop=crop, zoom_factor=zoom_factor)
-        if output_target is not None:
+        
         # Build output path preserving directory structure
         if output_target and Path(output_target).suffix and len(rel_path) > 0 and source_base is None:
+            out_dir = os.path.dirname(output_target)
             out_name = os.path.basename(output_target)
         elif source_base is not None:
             dir_part = os.path.dirname(rel_path)
@@ -335,7 +334,7 @@ def main():
 
     if is_calibration_dir and args.info:
         print('Error: --info is only supported when --calibration-path is a single .pkl file.')
-    if is_calibration_dir and args.undistorted_calibration and Path(args.undistorted_calibration).suffix.lower() == '.pkl':
+        return
 
     if is_calibration_dir and args.undistorted_calibration and os.path.isfile(args.undistorted_calibration):
         print('Error: in batch mode, --undistorted-calibration must be a directory path, not a file path.')
