@@ -43,7 +43,7 @@ def ensure_directory(path):
 def resolve_output_target(output_path, is_single_input):
     if is_single_input and output_path and Path(output_path).suffix:
         return output_path, os.path.dirname(output_path)
-    return output_path, output_path
+    return None, output_path
 
 
 def save_calibration_from_text(camera_matrix_path, distortion_coefficients_path, output_path, model=None):
