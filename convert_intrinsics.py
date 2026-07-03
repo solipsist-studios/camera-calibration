@@ -21,6 +21,26 @@ def save_calibration(data, path):
         pickle.dump(data, f)
     print(f'Saved converted calibration to {path}')
 
+def resolve_input_dimensions(data, input_width, input_height):
+    """Resolve source intrinsics dimensions from CLI args or calibration metadata."""
+    width = input_width
+    height = input_height
+
+    image_size = data.get('image_size')
+    if image_size is not None and len(image_size) >= 2:
+        if width is None:
+            width = int(image_size[0])
+        if height is None:
+            height = int(image_size[1])
+
+    if width is None or height is None:
+        raise ValueError(
+            'Input width/height not fully specified. Provide --input-width and --input-height, '
+            'or ensure calibration file contains image_size=(width, height).'
+        )
+
+    return width, height
+
 def convert_intrinsics(K_old, dim_input, dim_output):
     """
     Converts camera intrinsics from Calibration resolution to Video resolution.
@@ -106,12 +126,12 @@ def main():
         help='Path to save converted calibration pickle file. If not provided, prints to console only.'
     )
     parser.add_argument(
-        '-iw', '--input-width', type=int, required=True,
-        help='Width of input/source intrinsics resolution (pixels).'
+        '-iw', '--input-width', type=int,
+        help='Width of input/source intrinsics resolution (pixels). If omitted, uses calibration file image_size.'
     )
     parser.add_argument(
-        '-ih', '--input-height', type=int, required=True,
-        help='Height of input/source intrinsics resolution (pixels).'
+        '-ih', '--input-height', type=int,
+        help='Height of input/source intrinsics resolution (pixels). If omitted, uses calibration file image_size.'
     )
     parser.add_argument(
         '-ow', '--output-width', type=int, required=True,
@@ -136,7 +156,13 @@ def main():
 
     # Convert intrinsics
     K_old = data['camera_matrix']
-    dim_input = (args.input_width, args.input_height)
+    try:
+        input_width, input_height = resolve_input_dimensions(data, args.input_width, args.input_height)
+    except ValueError as exc:
+        print(f'Error: {exc}')
+        return
+
+    dim_input = (input_width, input_height)
     dim_output = (args.output_width, args.output_height)
 
     K_new = convert_intrinsics(K_old, dim_input, dim_output)
