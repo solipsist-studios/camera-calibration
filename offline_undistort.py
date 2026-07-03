@@ -243,7 +243,7 @@ def process_image_worker(args):
         # Undistort image
         undistorted = undistort_image(img, mtx, dist, fisheye=fisheye, alpha=alpha, 
                                      balance=balance, crop=crop, zoom_factor=zoom_factor)
-        if output_target and Path(output_target).suffix:
+        if output_target and Path(output_target).suffix:
         # Build output path preserving directory structure
         if output_target and Path(output_target).suffix and len(rel_path) > 0 and source_base is None:
             out_dir = os.path.dirname(output_target)
