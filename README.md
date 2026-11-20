@@ -67,6 +67,21 @@ Controls:
 - Press `d` to toggle between distorted and undistorted view
 - Press `q` to quit
 
+### Calibrating From the Command Line
+
+`calibrate_video.py` calibrates one camera without a display, from checkerboard
+footage or a folder of still images (this is the entry point Cumuli Studio uses):
+
+```bash
+python calibrate_video.py footage.mp4 --camera 0006 --out-dir calib/ [--model fisheye]
+```
+
+It reads every `--stride`-th frame, keeps a spread of distinct board views, and
+writes `Camera_<camera>.pkl` (the dictionary `camera_calibration.py` writes, plus
+`model` and `image_size`) and a JSON result with the RMS reprojection error and
+the number of boards found. Exit status is 0 on success, 1 when too few boards
+were found, and 2 on bad input.
+
 ## Configuration
 
 All scripts use variables instead of command-line arguments for configuration. You can modify these variables at the top of each script:
